@@ -1,9 +1,12 @@
 ﻿using SharpYaml.Serialization;
+using SharpYaml.Tokens;
 using Syroot.BinaryData;
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Reflection.PortableExecutable;
 using System.Text;
 using static CLMS.LMS;
 using static CLMS.Shared;
@@ -108,8 +111,13 @@ namespace CLMS
             return Write(optimize);
         }
 
-        #region yaml
         public string ToYaml()
+        {
+            return ToYaml(null);
+        }
+
+        #region yaml
+        public string ToYaml(MSBP message_project = null)
         {
             YamlMappingNode root = new();
             YamlMappingNode messagesNode = new();
@@ -138,8 +146,17 @@ namespace CLMS
 
                         YamlMappingNode tagNode = new();
 
-                        tagNode.Add("Group", tag.Group.ToString());
-                        tagNode.Add("Type", tag.Type.ToString());
+                        if (message_project != null && message_project.ContainsControlTag(new TagConfig(tag)))
+                        {
+                            string[] ctrl = message_project.TryGetControlTagByTag(tag);
+                            tagNode.Add("Msbp_Tag", string.Join(",", ctrl));
+                         }
+                        else
+                        {
+                            tagNode.Add("Group", tag.Group.ToString());
+                            tagNode.Add("Type", tag.Type.ToString());
+                        }
+
                         tagNode.Add("Parameters", ByteArrayToString(tag.Parameters, true));
 
                         tagsNode.Add($"Tag_{tagCount}", tagNode);
@@ -185,13 +202,50 @@ namespace CLMS
                     }
                     if (item.Value.Attribute.Data.Length > 0)
                     {
-                        messageNode.Add("Attribute", ByteArrayToString(item.Value.Attribute.Data));
+                       if (message_project != null)
+                        {
+                            YamlMappingNode attributeNode = new();
+
+                            using (var reader = new BinaryReader(new MemoryStream(item.Value.Attribute.Data)))
+                            {
+                                foreach (var attr_info in message_project.AttributeInfos)
+                                {
+                                    if (attr_info.Value.Offset >= reader.BaseStream.Length)
+                                        continue;
+
+                                    reader.BaseStream.Seek(attr_info.Value.Offset, SeekOrigin.Begin);
+
+                                    string value = "";
+
+                                    if (attr_info.Value.Type == 9) //list
+                                    {
+                                        byte id = reader.ReadByte();
+                                        value = attr_info.Value.List[id];
+                                    }
+                                    else if (attr_info.Value.Type == 2) //uint
+                                        value = reader.ReadUInt32().ToString();
+                                    else if (attr_info.Value.Type == 8) //uint
+                                        value = reader.ReadByte().ToString();
+
+                                    attributeNode.Add($"{attr_info.Key}", value);
+                                }
+                            }
+                            messageNode.Add("MSBP_Attribute", attributeNode);
+                        }
+                        else
+                            messageNode.Add("Attribute", ByteArrayToString(item.Value.Attribute.Data));
                     }
                 }
 
                 if (HasStyleIndices)
                 {
-                    messageNode.Add("StyleID", item.Value.StyleIndex.ToString());
+                    if (message_project != null)
+                    {
+                        var style = message_project.Styles.Keys.ToList()[item.Value.StyleIndex];
+                        messageNode.Add($"MSBP_Style", style.ToString());
+                    }
+                    else
+                        messageNode.Add("StyleID", item.Value.StyleIndex.ToString());
                 }
 
                 messagesNode.Add((string)item.Key, messageNode);
@@ -220,7 +274,7 @@ namespace CLMS
 
             return root.Print();
         }
-        public static MSBT FromYaml(string yaml)
+        public static MSBT FromYaml(string yaml, MSBP message_project)
         {
             MSBT msbt = new();
 
@@ -295,13 +349,55 @@ namespace CLMS
                                         message.Attribute = new(new byte[0], attributeNode.ToString());
                                     }
                                 }
+                                if (messageNode.Children.ContainsKey(new YamlScalarNode("MSBP_Attribute")))
+                                {
+                                    var mem = new MemoryStream();
+                                    using (var writer = new BinaryWriter(mem))
+                                    {
+                                        writer.Write(new byte[17]);
+
+                                        var attributeNode = (YamlMappingNode)messageNode.ChildrenByKey("MSBP_Attribute");
+                                        foreach (var child in attributeNode.Children)
+                                        {
+                                            var name = ((YamlScalarNode)child.Key).Value;
+                                            var attr_value = child.Value.ToString();
+
+                                            if (message_project.AttributeInfos.ContainsKey(name))
+                                            {
+                                                var attr = message_project.AttributeInfos[name];
+
+                                                writer.Seek((int)attr.Offset, SeekOrigin.Begin);
+
+                                                if (attr.Type == 9) //list
+                                                {
+                                                    int index = attr.List.IndexOf(attr_value);
+                                                    if (index != -1)
+                                                        writer.Write((byte)index);
+                                                }
+                                                else if (attr.Type == 8) //byte
+                                                    writer.Write((byte)int.Parse(attr_value));
+                                                else if (attr.Type == 2) //uint
+                                                    writer.Write((uint)int.Parse(attr_value));
+                                            }
+                                        }
+                                    }
+
+                                    message.Attribute = new Attribute(mem.ToArray());
+                                }
                             }
 
                             if (msbt.HasStyleIndices)
                             {
                                 var attributeNode = messageNode.ChildrenByKey("StyleID");
-
-                                message.StyleIndex = int.Parse(attributeNode.ToString());
+                                var attributeNodeMSBP = messageNode.ChildrenByKey("MSBP_Style");
+                                if (attributeNodeMSBP != null)
+                                {
+                                    int index = message_project.Styles.Keys.ToList().IndexOf(attributeNodeMSBP.ToString());
+                                    if (index != -1)
+                                        message.StyleIndex = index;
+                                }
+                                else
+                                    message.StyleIndex = int.Parse(attributeNode.ToString());
                             }
 
                             if (messageNode.Children.ContainsKey(new YamlScalarNode("Tags")))
@@ -334,6 +430,13 @@ namespace CLMS
                                                     break;
                                                 case "Parameters":
                                                     tag.Parameters = StringToByteArray(tagChildValue);
+                                                    break;
+                                                case "Msbp_Tag":
+                                                    //string array ,
+                                                    string[] values = tagChildValue.Split(",");
+                                                    var t = message_project.TryGetTagConfigByControlTag(values[0], values[1]);
+                                                    tag.Group = t.Group;
+                                                    tag.Type = t.Type;
                                                     break;
                                                 case "RegionEndMarkerBytes":
                                                     tagEnd = new(StringToByteArray(tagChildValue));
