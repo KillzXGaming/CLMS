@@ -3,12 +3,14 @@ using SharpYaml.Tokens;
 using Syroot.BinaryData;
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Reflection.PortableExecutable;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Xml;
+using System.Xml.Serialization;
 using static CLMS.LMS;
+using static CLMS.MSBP;
 using static CLMS.Shared;
 
 namespace CLMS
@@ -115,6 +117,268 @@ namespace CLMS
         {
             return ToYaml(null);
         }
+
+        #region xml
+
+        public string ToXml(MSBP message_project = null)
+        {
+            XmlMsbt ob = new XmlMsbt()
+            {
+                Version = this.VersionNumber,
+                Encoding = this.EncodingType,
+                IsBigEndian = this.ByteOrder == ByteOrder.BigEndian,
+                SizePerAttribute = this.SizePerAttribute,
+                SlotNum = this.LabelSlotCount,
+                UseIndices = this.HasNLI1,
+                UseAttributes = this.HasAttributes,
+                UseStyles = this.HasStyleIndices,
+            };
+            foreach (var item in this.Messages)
+            {
+                object[] messageParams = item.Value.Contents.ToArray();
+                string text = "";
+
+                XmlMsbtMessage message = new XmlMsbtMessage();
+
+                List<XmlMsbtTag> tags = new List<XmlMsbtTag>();
+
+                int tagCount = 0;
+                foreach (var cParam in messageParams)
+                {
+                    if (cParam is string)
+                    {
+                        string mess = ((string)cParam).Replace($"{Tag.SeparatorChars[0]}", $"\\{Tag.SeparatorChars[0]}");
+                        text += mess.Replace("\n", "&#xA;");
+                    }
+                    if (cParam is Tag)
+                    {
+                        Tag tag = (Tag)cParam;
+
+                        // TODO: fix this to be /> if there wont be a TagEnd (quite a hard challenge)
+                        text += $"[Tag_{tagCount}]";
+
+                        XmlMsbtTag tagNode = new();
+                        tagNode.Name = $"[Tag_{tagCount}]";
+
+                        if (message_project != null && message_project.ContainsControlTag(new TagConfig(tag)))
+                        {
+                            string[] ctrl = message_project.TryGetControlTagByTag(tag);
+
+                            tagNode.Group = tag.Group.ToString();
+                            tagNode.Type = tag.Type.ToString();
+                        }
+                        else
+                        {
+                            tagNode.Group = tag.Group.ToString();
+                            tagNode.Type = tag.Type.ToString();
+                        }
+                        tagNode.Parameters = ByteArrayToString(tag.Parameters, true);
+
+                        tags.Add(tagNode);
+                        tagCount++;
+                    }
+                    if (cParam is TagEnd)
+                    {
+                        TagEnd tagEnd = (TagEnd)cParam;
+                        text += $"[TagEnd_{tagCount - 1}]";
+
+                        XmlMsbtTag tagNode = new();
+                        tagNode.Name = $"[TagEnd_{tagCount - 1}]";
+                        tagNode.Parameters = ByteArrayToString(tagEnd.RegionEndMarkerBytes, true);
+                        tags.Add(tagNode);
+
+                    }
+                }
+
+                // fixing SharpYaml glitch manually here lol
+                bool hasSpecialChars = false;
+                foreach (char cChar in text)
+                    if (char.IsControl(cChar)) { hasSpecialChars = true; }
+
+                if (!hasSpecialChars && text.Length > 0)
+                {
+                    if (text[0] == '\'' && text[text.Length - 1] != '\'')
+                    {
+                        text = text.Replace("'", "''");
+                        text = $"'{text}'";
+                    }
+                }
+
+                message.Label = (string)item.Key;
+                message.Content = text;
+                message.Tags.AddRange(tags);
+
+                if (item.Value.Attribute?.Data?.Length > 0)
+                    message.Attributes = ByteArrayToString(item.Value.Attribute.Data);
+
+
+                ob.Messages.Add(message);
+            }
+
+            using (var writer = new System.IO.StringWriter())
+            {
+                var serializer = new XmlSerializer(typeof(XmlMsbt));
+                serializer.Serialize(writer, ob);
+                writer.Flush();
+
+                return writer.ToString();
+            }
+        }
+
+        public class XmlMsbt
+        {
+            [XmlAttribute]
+            public byte Version { get; set; }
+
+            [XmlAttribute]
+            public bool IsBigEndian { get; set; }
+
+            [XmlAttribute]
+            public bool UseIndices { get; set; }
+            [XmlAttribute]
+            public bool UseStyles { get; set; }
+            [XmlAttribute]
+            public bool UseAttributes { get; set; }
+
+            [XmlAttribute]
+            public uint SizePerAttribute { get; set; }
+            [XmlAttribute]
+            public EncodingType Encoding { get; set; }
+            [XmlAttribute]
+            public uint SlotNum { get; set; }
+
+            [XmlArray]
+            public List<XmlMsbtMessage> Messages { get; set; } = new List<XmlMsbtMessage>();
+        }
+
+        public class XmlMsbtTag
+        {
+            [XmlAttribute]
+            public string Name { get; set; }
+            [XmlAttribute]
+            public string Group { get; set; }
+            [XmlAttribute]
+            public string Type { get; set; }
+            [XmlAttribute]
+            public string Parameters { get; set; }
+        }
+
+        public class XmlMsbtMessage
+        {
+            [XmlAttribute]
+            public string Label;
+
+            [XmlElement]
+            public string Content;
+
+            [XmlArray]
+            public List<XmlMsbtTag> Tags { get; set; } = new List<XmlMsbtTag>();
+
+            [XmlElement]
+            public string Attributes;
+        }
+
+        public static MSBT FromXml(string xml, MSBP msbp = null)
+        {
+            var xmlSerializer = new XmlSerializer(typeof(XmlMsbt));
+            using (var stringReader = new StringReader(xml))
+            {
+                XmlMsbt ob = (XmlMsbt)xmlSerializer.Deserialize(stringReader);
+
+                MSBT result = new MSBT
+                {
+                    VersionNumber = ob.Version,
+                    EncodingType = ob.Encoding,
+                    ByteOrder = ob.IsBigEndian ? ByteOrder.BigEndian : ByteOrder.LittleEndian,
+                    SizePerAttribute = ob.SizePerAttribute,
+                    LabelSlotCount = ob.SlotNum,
+                    HasNLI1 = ob.UseIndices,
+                    HasAttributes = ob.UseAttributes,
+                    HasStyleIndices = ob.UseStyles,
+                    Messages = new LMSDictionary<Message>(),
+                };
+
+                foreach (var message in ob.Messages)
+                {
+                    var messageContent = new Message
+                    {
+                        Contents = new List<object>(),
+                        Attribute = new Attribute { Data = StringToByteArray(message.Attributes) }
+                    };
+
+                    var text = message.Content;
+
+                    Dictionary<string, (Tag tag, TagEnd tagEnd)> tags = new();
+
+                    foreach (var tag in message.Tags)
+                    {
+                        TagEnd tagEnd = null;
+                        Tag tagValue = null;
+
+                        if (tag.Name.Contains("TagEnd"))
+                        {
+                            var tagParameters = StringToByteArray(tag.Parameters);
+                            tagEnd = new TagEnd
+                            {
+                                RegionEndMarkerBytes = tagParameters
+                            };
+                        }
+                        else
+                        {
+                            var tagParameters = StringToByteArray(tag.Parameters);
+
+                            tagValue = new Tag
+                            {
+                                Group = ushort.Parse(tag.Group),
+                                Type = ushort.Parse(tag.Type),
+                                Parameters = tagParameters
+                            };
+                        }
+
+                        tags.Add(tag.Name, (tagValue, tagEnd));
+                    }
+
+                    messageContent.Contents = SplitMessageContent(message.Content, tags);
+                    result.Messages.Add(message.Label, messageContent);
+                }
+
+                return result;
+            }
+        }
+
+        public static List<object> SplitMessageContent(string content, Dictionary<string, (Tag tag, TagEnd tagEnd)> tags)
+        {
+            List<object> result = new List<object>();
+            Regex regex = new Regex(@"\[Tag_\d+\]|\[TagEnd_\d+\]");
+            int lastIndex = 0;
+
+            foreach (Match match in regex.Matches(content))
+            {
+                if (match.Index > lastIndex)
+                    result.Add(content.Substring(lastIndex, match.Index - lastIndex));
+
+                if (tags.ContainsKey($"{match.Value}"))
+                {
+                    if (match.Value.Contains("TagEnd_"))
+                        result.Add(tags[match.Value].tagEnd);
+                    else
+                        result.Add(tags[match.Value].tag);
+                }
+                else
+                    throw new Exception();
+
+                lastIndex = match.Index + match.Length;
+            }
+
+            if (lastIndex < content.Length)
+            {
+                result.Add(content.Substring(lastIndex));
+            }
+
+            return result;
+        }
+
+        #endregion
 
         #region yaml
         public string ToYaml(MSBP message_project = null)
@@ -274,6 +538,7 @@ namespace CLMS
 
             return root.Print();
         }
+
         public static MSBT FromYaml(string yaml, MSBP message_project)
         {
             MSBT msbt = new();

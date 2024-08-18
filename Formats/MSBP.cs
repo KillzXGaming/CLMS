@@ -470,6 +470,8 @@ namespace CLMS
 
         public bool ContainsControlTag(TagConfig aTagConfig)
         {
+            if (ControlTags == null) return false;
+
             foreach (var cControlTagGroup in ControlTags)
             {
                 for (ushort j = 0; j < cControlTagGroup.Value.ControlTagTypes.Count; j++)
@@ -638,7 +640,7 @@ namespace CLMS
                 {
                     Colors.Type = LMSDictionaryKeyType.None;
 
-                    for (uint i = 0; i < clb1.LabelHolder.Labels.Length; i++)
+                    for (uint i = 0; i < clb1.LabelHolder?.Labels?.Length; i++)
                     {
                         Colors.Add(clr1.Colors[i]);
                     }
