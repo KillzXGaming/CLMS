@@ -874,14 +874,27 @@ namespace CLMS
             (string, ushort, ushort[])[] tagGroupData = new (string, ushort, ushort[])[tagGroupNum];
             reader.SkipBytes(2);
 
+            ushort idx = 0;
             for (uint i = 0; i < tagGroupNum; i++)
             {
                 uint cTagGroupPosition = reader.ReadUInt32();
                 long positionBuf = reader.Position;
                 reader.Position = startPosition + cTagGroupPosition;
 
-                ushort cTagGroupIndex = reader.ReadUInt16();
-                ushort numOfTagIndices = reader.ReadUInt16();
+                ushort cTagGroupIndex;
+                ushort numOfTagIndices;
+                if (this.VersionNumber <= 3) //no index, just counter
+                {
+                    numOfTagIndices = reader.ReadUInt16();
+                    cTagGroupIndex = idx;
+                    idx += numOfTagIndices; //calculate index
+                }
+                else
+                {
+                    cTagGroupIndex = reader.ReadUInt16();
+                    numOfTagIndices = reader.ReadUInt16();
+                }
+
                 ushort[] cTagGroupTypeIndices = new ushort[numOfTagIndices];
 
                 for (uint j = 0; j < numOfTagIndices; j++)
@@ -1237,7 +1250,8 @@ namespace CLMS
                 long cMessageOffset = writer.Position;
                 writer.GoBackWriteRestore(hashTablePosBuf + (i * 4), (uint)(cMessageOffset - startPosition));
 
-                writer.Write(tagGroupData[i].Index);
+                if (this.VersionNumber > 3)
+                   writer.Write(tagGroupData[i].Index);
                 writer.Write((ushort)tagGroupData[i].TagIndices.Length);
 
                 for (uint j = 0; j < tagGroupData[i].TagIndices.Length; j++)

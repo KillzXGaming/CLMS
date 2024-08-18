@@ -464,7 +464,7 @@ namespace CLMS
                     {
                         messageNode.Add("AttributeString", item.Value.Attribute.String);
                     }
-                    if (item.Value.Attribute.Data.Length > 0)
+                    if (item.Value.Attribute != null && item.Value.Attribute.Data.Length > 0)
                     {
                        if (message_project != null)
                         {
@@ -503,7 +503,7 @@ namespace CLMS
 
                 if (HasStyleIndices)
                 {
-                    if (message_project != null)
+                    if (item.Value.StyleIndex != -1 && message_project != null && message_project.Styles.Keys.Count > item.Value.StyleIndex)
                     {
                         var style = message_project.Styles.Keys.ToList()[item.Value.StyleIndex];
                         messageNode.Add($"MSBP_Style", style.ToString());
@@ -1219,11 +1219,13 @@ namespace CLMS
                 Message cMessage = new();
                 if (isTSY1)
                 {
-                    cMessage.StyleIndex = sty1.StyleIndices[i];
+                    if (sty1.StyleIndices.Length > i)
+                        cMessage.StyleIndex = sty1.StyleIndices[i];
                 }
                 if (isATR1)
                 {
-                    cMessage.Attribute = atr1.Attributes[i];
+                    if (atr1.Attributes.Length > i)
+                        cMessage.Attribute = atr1.Attributes[i];
                 }
                 uint cStringOffset = reader.ReadUInt32();
                 long positionBuf = reader.Position;
