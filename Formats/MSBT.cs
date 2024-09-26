@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection.Emit;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -132,6 +133,8 @@ namespace CLMS
                 UseIndices = this.HasNLI1,
                 UseAttributes = this.HasAttributes,
                 UseStyles = this.HasStyleIndices,
+                UsesAttributeStrings = this.UsesAttributeStrings,
+                ATO1Content = this.ATO1Content,
             };
             foreach (var item in this.Messages)
             {
@@ -207,6 +210,7 @@ namespace CLMS
                 message.Label = (string)item.Key;
                 message.Content = text;
                 message.Tags.AddRange(tags);
+                message.StyleIndex = item.Value.StyleIndex;
 
                 if (item.Value.Attribute?.Data?.Length > 0)
                     message.Attributes = ByteArrayToString(item.Value.Attribute.Data);
@@ -239,6 +243,8 @@ namespace CLMS
             public bool UseStyles { get; set; }
             [XmlAttribute]
             public bool UseAttributes { get; set; }
+            [XmlAttribute]
+            public bool UsesAttributeStrings { get; set; } = true;
 
             [XmlAttribute]
             public uint SizePerAttribute { get; set; }
@@ -249,6 +255,8 @@ namespace CLMS
 
             [XmlArray]
             public List<XmlMsbtMessage> Messages { get; set; } = new List<XmlMsbtMessage>();
+
+            public byte[] ATO1Content { get; set; }
         }
 
         public class XmlMsbtTag
@@ -267,6 +275,9 @@ namespace CLMS
         {
             [XmlAttribute]
             public string Label;
+
+            [XmlAttribute]
+            public int StyleIndex;
 
             [XmlElement]
             public string Content;
@@ -295,16 +306,26 @@ namespace CLMS
                     HasNLI1 = ob.UseIndices,
                     HasAttributes = ob.UseAttributes,
                     HasStyleIndices = ob.UseStyles,
-                    Messages = new LMSDictionary<Message>(),
+                    Messages = new LMSDictionary<Message>()
+                    {
+                        Type = (ob.UseIndices ? LMSDictionaryKeyType.Indices : LMSDictionaryKeyType.Labels)
+                    },
+                    UsesAttributeStrings = ob.UsesAttributeStrings,
+                    ATO1Content = ob.ATO1Content,
+                    HasATO1 = ob.ATO1Content?.Length > 0,
                 };
 
                 foreach (var message in ob.Messages)
                 {
+                    message.Content = message.Content.Replace("&#xA;", "\n");
+
                     var messageContent = new Message
                     {
                         Contents = new List<object>(),
-                        Attribute = new Attribute { Data = StringToByteArray(message.Attributes) }
                     };
+
+                    if (!string.IsNullOrEmpty(message.Attributes))
+                        messageContent.Attribute = new Attribute { Data = StringToByteArray(message.Attributes) };
 
                     var text = message.Content;
 
@@ -339,7 +360,16 @@ namespace CLMS
                     }
 
                     messageContent.Contents = SplitMessageContent(message.Content, tags);
-                    result.Messages.Add(message.Label, messageContent);
+
+                    messageContent.StyleIndex = message.StyleIndex;
+
+                    if (result.HasNLI1)
+                    {
+                        int.TryParse(message.Label, out int label_id);
+                        result.Messages.Add(label_id, messageContent);
+                    }
+                    else
+                        result.Messages.Add(message.Label, messageContent);
                 }
 
                 return result;
@@ -365,7 +395,8 @@ namespace CLMS
                         result.Add(tags[match.Value].tag);
                 }
                 else
-                    throw new Exception();
+                    continue;
+                    //throw new Exception($"Failed to find tag {match.Value} message {content}");
 
                 lastIndex = match.Index + match.Length;
             }
@@ -466,7 +497,7 @@ namespace CLMS
                     }
                     if (item.Value.Attribute != null && item.Value.Attribute.Data.Length > 0)
                     {
-                       if (message_project != null)
+                       if (message_project != null && message_project.AttributeInfos != null)
                         {
                             YamlMappingNode attributeNode = new();
 
@@ -511,8 +542,10 @@ namespace CLMS
                     else
                         messageNode.Add("StyleID", item.Value.StyleIndex.ToString());
                 }
-
-                messagesNode.Add((string)item.Key, messageNode);
+                if (item.Key is int)
+                    messagesNode.Add(((int)item.Key).ToString(), messageNode);
+                else
+                    messagesNode.Add((string)item.Key, messageNode);
             }
 
             string encoding = "";
@@ -535,6 +568,8 @@ namespace CLMS
             root.Add("Encoding", encoding);
             root.Add("SlotNum", LabelSlotCount.ToString());
             root.Add("Messages", messagesNode);
+            if (this.ATO1Content?.Length > 0)
+                root.Add("ATO1Content", ByteArrayToString(this.ATO1Content, true));
 
             return root.Print();
         }
@@ -554,12 +589,23 @@ namespace CLMS
                     case "Version":
                         msbt.VersionNumber = byte.Parse(value);
                         break;
+                    case "ATO1Content":
+                        msbt.ATO1Content = StringToByteArray(value);
+                        msbt.HasATO1 = true;
+                        break;
                     case "IsBigEndian":
                         msbt.ByteOrder = bool.Parse(value) ? ByteOrder.BigEndian : ByteOrder.LittleEndian;
                         break;
                     case "UseIndices":
                     case "UseIndexes":
                         msbt.HasNLI1 = bool.Parse(value);
+                        if (msbt.HasNLI1)
+                        {
+                            msbt.Messages = new LMSDictionary<Message>()
+                            {
+                                Type = LMSDictionaryKeyType.Indices
+                            };
+                        };
                         break;
                     case "UseStyles":
                         msbt.HasStyleIndices = bool.Parse(value);
@@ -802,7 +848,15 @@ namespace CLMS
                                 message.Contents.Add(contentsNode.ToString().Replace($"\\{Tag.SeparatorChars[0]}", $"{Tag.SeparatorChars[0]}"));
                             }
 
-                            msbt.Messages.Add(messageChild.Key.ToString(), message);
+                            if (msbt.HasNLI1)
+                            {
+                                if (int.TryParse(messageChild.Key.ToString(), out int label_id))
+                                    msbt.Messages.Add(label_id, message);
+                                else
+                                    throw new Exception($"Invalid label ID {messageChild.Key}! Must be number!");
+                            }
+                            else
+                                msbt.Messages.Add(messageChild.Key.ToString(), message);
                         }
                         break;
                 }
@@ -927,6 +981,10 @@ namespace CLMS
         {
             Messages.Remove(key);
         }
+        public void RemoveMessageByKey(int key)
+        {
+            Messages.Remove(key);
+        }
         public void RemoveMessageByIndex(int index)
         {
             Messages.Remove(Messages.Keys.ToArray()[index]);
@@ -934,6 +992,21 @@ namespace CLMS
         #endregion
 
         #region misc
+
+        public void CopyFrom(MSBT msbt)
+        {
+            VersionNumber = msbt.VersionNumber;
+            EncodingType = msbt.EncodingType;
+            ByteOrder = msbt.ByteOrder;
+            SizePerAttribute = msbt.SizePerAttribute;
+            LabelSlotCount = msbt.LabelSlotCount;
+            HasNLI1 = msbt.HasNLI1;
+            HasAttributes = msbt.HasAttributes;
+            HasStyleIndices = msbt.HasStyleIndices;
+            HasATO1 = msbt.HasATO1;
+            ATO1Content = msbt.ATO1Content;
+            Messages = msbt.Messages;
+        }
 
         // temporary (planned to get replaced by another system)
         public void SetATO1(byte[] value)
@@ -1157,6 +1230,11 @@ namespace CLMS
                     }
 
                     uint cStringOffset = BitConverter.ToUInt32(cAttributeBytes[0..4]); // BitConverter.ToUInt32(cAttributeBytes[(cAttributeBytes.Length - 4)..cAttributeBytes.Length]);
+                    if (cStringOffset > cSectionSize || cStringOffset < (8 + (numOfAttributes * sizePerAttribute)))
+                    {
+                        attributeList.Add(new(cAttributeBytes));
+                        continue;
+                    }
 
                     reader.Position = startPosition + cStringOffset;
 
@@ -1378,7 +1456,7 @@ namespace CLMS
             writer.Write((uint)messages.Length);
             writer.Write(SizePerAttribute);
 
-            if (UsesAttributeStrings)
+            if (UsesAttributeStrings && messages.Length > 0 && !string.IsNullOrEmpty(messages[0].Attribute.String))
             {
                 long hashTablePosBuf = writer.Position;
                 writer.Position += messages.Length * SizePerAttribute;
@@ -1400,11 +1478,22 @@ namespace CLMS
 
                     writer.GoBackWriteRestore(hashTablePosBuf + (i * SizePerAttribute), cAttribute);
 
-                    writer.Write(messages[i].Attribute.String, BinaryStringFormat.NoPrefixOrTermination);
+                    if (messages[i].Attribute.String != null)
+                        writer.Write(messages[i].Attribute.String, BinaryStringFormat.NoPrefixOrTermination);
 
                     // manually reimplimenting null termination because BinaryStringFormat sucks bruh
                     writer.WriteChar(0x00);
                 }
+            }
+            else if (UsesAttributeStrings)
+            {
+                //empty list
+                for (uint i = 0; i < messages.Length; i++)
+                {
+                    if (messages[i].Attribute != null)
+                        writer.Write(messages[i].Attribute.Data[0..(int)SizePerAttribute]);
+                }
+                writer.Write(new byte[messages.Length]);
             }
             else
             {
@@ -1496,7 +1585,7 @@ namespace CLMS
         {
             public Dictionary<uint, uint> NumLines;
         }
-        internal class ATO1
+        public class ATO1
         {
             public byte[] Content;
         }
