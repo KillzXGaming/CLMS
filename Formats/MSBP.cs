@@ -430,18 +430,15 @@ namespace CLMS
         #region TagControl getting
         public TagConfig TryGetTagConfigByControlTag(string aTagGroup, string aTagType)
         {
-            for (ushort group = 0; group < ControlTags.Count; group++)
+            foreach (var tagGroup in ControlTags)
             {
-                if (ControlTags[group].Name == aTagGroup)
+                if (tagGroup.Value.Name == aTagGroup)
                 {
-                    for (ushort type = 0; type < ControlTags[group].ControlTagTypes.Count; type++)
-                    {
-                        if (ControlTags[group].ControlTagTypes[type].Name == aTagType)
-                        {
-                            return new(group, type);
-                        }
+                    for (ushort type = 0; type < tagGroup.Value.ControlTagTypes.Count; type++) {
+                        if (tagGroup.Value.ControlTagTypes[type].Name == aTagType)
+                            return new(tagGroup.Key, type);
                     }
-                }
+                } 
             }
             throw new Exception("TagGroup does not exist: " + aTagGroup);
         }
